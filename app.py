@@ -1,4 +1,6 @@
 import datetime
+import os
+import time
 from json import JSONEncoder
 
 import numpy
@@ -11,46 +13,43 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib import dates
+import matplotlib.dates as mdate
+
+from NumpyArrayEncoder import NumpyArrayEncoder
+from trade import Trade
 
 plt.style.use('fivethirtyeight')
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
-
-@app.route('/')
-def hello_world():
-    return 'Hello World!'
-
+def get_history(crypto):
+    url = f"https://api-pub.bitfinex.com/v2/candles/trade:5m:t{crypto}USD/hist"
+    res = requests.get(url)
+    trades = np.array(json.loads(res.text))
+    # pd_trades = pd.DataFrame(
+    #     {'date': trades[:, 0], 'open': trades[:, 1], 'close': trades[:, 2], 'high': trades[:, 3], 'low': trades[:, 4],
+    #      'volume': trades[:, 5]})
+    pd_trades = pd.DataFrame(
+        {'date': mdate.epoch2num(trades[:, 0]/1000), 'open': trades[:, 1], 'close': trades[:, 2], 'high': trades[:, 3], 'low': trades[:, 4],
+         'volume': trades[:, 5]})
+    return pd_trades
 
 @app.route('/mfi', methods=["POST"])
-def fetch_history():
+def mfi_route():
     cryptocurrency = request.form['crypto']
-    url = f"https://api-pub.bitfinex.com/v2/candles/trade:5m:t{cryptocurrency}USD/hist"
-    res = requests.get(url)
-    # trades = convertTrades(json.loads(res.text))
-    trades = np.array(json.loads(res.text))
+    trades = get_history(cryptocurrency)
 
-    # [MTS,OPEN,CLOSE,HIGH,LOW,VOLUME]
+    return calculate_mfi(get_history(cryptocurrency))
 
-    pd_trades = pd.DataFrame(
-        {'date': trades[:, 0], 'open': trades[:, 1], 'close': trades[:, 2], 'high': trades[:, 3], 'low': trades[:, 4],
-         'volume': trades[:, 5]})
-    # pd_trades = pd_trades.set_index(pd.DatetimeIndex(pd_trades['mts'].values))
 
-    plt.figure(figsize=(22.2, 14.5))  # width = 12.2in, height = 4.5
-    plt.plot(pd_trades['close'],
-             label='Close Price')  # plt.plot( X-Axis , Y-Axis, line_width, alpha_for_blending,  label)
-    plt.title('Close Price History')
-    plt.xlabel('Date', fontsize=18)
-    plt.ylabel('Close Price USD ($)', fontsize=18)
-    plt.legend(pd_trades.columns.values, loc='upper left')
-    plt.show()
-    mfi = calculate_mfi(pd_trades)
-    # print(np.asarray(mfi))
-    # str = f"{mfi}".replace('\n', '').replace(' ', ',').replace(',]', ']')
-    # return {'mfi': JSONEncoder.encode(mfi)}
-    return json.dumps(mfi, cls=NumpyArrayEncoder)
+@app.route('/chart', methods=["GET"])
+def display_chart():
+    cryptocurrency = request.args.get('crypto')
+    chart = create_chart(get_history(cryptocurrency))
+    return render_template("views/chart.html", image='static/my_plot.png')
 
 def calculate_mfi(df):
     typical_price = (df['close'] + df['high'] + df['low']) / 3
@@ -87,8 +86,7 @@ def calculate_mfi(df):
         negative_mf.append(sum(negative_flow[i + 1 - period: i + 1]))
 
     mfi = 100 * (np.array(positive_mf) / (np.array(positive_mf) + np.array(negative_mf)))
-
-    return mfi
+    return json.dumps(mfi, cls=NumpyArrayEncoder)
 
 
 def convert_trades(data):
@@ -98,32 +96,28 @@ def convert_trades(data):
     return trades
 
 
+def create_chart(pd_trades):
+    plt.figure(figsize=(22.2, 14.5))  # width = 12.2in, height = 4.5
+    plt.plot(pd_trades['date'], pd_trades['close'],
+             label='Close Price')  # plt.plot( X-Axis , Y-Axis, line_width, alpha_for_blending,  label)
+    plt.title('Close Price History')
+    plt.xlabel('Date', fontsize=18)
+    formatter = dates.DateFormatter('%H:%M:%S')
+    ax = plt.gcf().axes[0]
+    ax.xaxis.set_major_formatter(formatter)
+    ax.xaxis.set_minor_locator(dates.MinuteLocator(interval=1))
+    ax.xaxis.set_major_locator(dates.MinuteLocator(interval=30))  # every day
+    plt.gcf().autofmt_xdate(rotation=25)
+    plt.ylabel('Close Price USD ($)', fontsize=18)
+    plt.legend(pd_trades.columns.values, loc='upper left')
+    filePath = os.path.join('static/my_plot.png')
+    if os.path.isfile(filePath):
+        os.remove(filePath)
+    plt.savefig('static/my_plot.png')
+    plt.close()
+    plt.show()
+    return plt
+
 if __name__ == '__main__':
     app.run()
 
-
-class Trade(JSONEncoder):
-    # [MTS,OPEN,CLOSE,HIGH,LOW,VOLUME]
-    def __init__(self, dt):
-        super().__init__()
-        self.mts = datetime.datetime.fromtimestamp(dt[0] / 1000)  # epoch time has to be divided by 1000
-        self.open = dt[1]
-        self.close = dt[2]
-        self.high = dt[3]
-        self.low = dt[4]
-        self.volume = dt[5]
-
-    def default(self, o):
-        return o.__dict__
-
-
-class NumpyArrayEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        else:
-            return super(NumpyArrayEncoder, self).default(obj)
